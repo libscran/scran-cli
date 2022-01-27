@@ -1,18 +1,40 @@
-#include "scran/scran.hpp"
-
 #include "CLI/App.hpp"
 #include "CLI/Formatter.hpp"
 #include "CLI/Config.hpp"
 
+#include <map>
+#include <memory>
+#include <thread>
+
+int nthreads_global = 1;
+
+template<class Function>
+void run_parallel(int total, Function fun) {
+    int nworkers = nthreads_global;
+    int jobs_per_worker = std::ceil(static_cast<double>(total)/nworkers);
+    std::vector<std::thread> workers;
+    workers.reserve(nworkers);
+    int first = 0;
+
+    for (int w = 0; w < nworkers && first < total; ++w, first += jobs_per_worker) {
+        int last = std::min(first + jobs_per_worker, total);
+        workers.emplace_back(fun, first, last);
+    }
+
+    for (auto& wrk : workers) {
+        wrk.join();
+    }
+}
+
+#define TATAMI_CUSTOM_PARALLEL run_parallel
+#define SCRAN_CUSTOM_PARALLEL run_parallel
+#define KNNCOLLE_CUSTOM_PARALLEL run_parallel
+
+#include "scran/scran.hpp"
 #include "tatami/ext/MatrixMarket_layered.hpp"
 
 #include "qdtsne/qdtsne.hpp"
 #include "umappp/Umap.hpp"
-
-#include <map>
-#include <memory>
-
-#include <omp.h>
 
 int main(int argc, char* argv []) {
     /** Parsing the arguments. **/
@@ -85,7 +107,7 @@ int main(int argc, char* argv []) {
 
     CLI11_PARSE(app, argc, argv);
 
-    omp_set_num_threads(nthreads);
+    nthreads_global = nthreads;
 
     // Loading the data from an MatrixMarket file.
     size_t n = path.size();
@@ -122,57 +144,34 @@ int main(int argc, char* argv []) {
     }
 
     // Finding all the neighbors.
-    std::vector<std::vector<int> > snn_nns(ptr->nobs());
-    #pragma omp parallel for
-    for (size_t i = 0; i < snn_nns.size(); ++i) {
-        auto current = ptr->find_nearest_neighbors(i, snn_neighbors);
-        for (const auto& x : current) {
-            snn_nns[i].push_back(x.first);
-        }
-    }
+    auto snn_nns = knncolle::find_nearest_neighbors_index_only<int>(ptr.get(), snn_neighbors);
+    auto tsne_nns = knncolle::find_nearest_neighbors<int, double>(ptr.get(), qdtsne::perplexity_to_k(tsne_perplexity));
+    auto umap_nns = knncolle::find_nearest_neighbors<int, float>(ptr.get(), umap_neighbors);
 
-    std::vector<std::vector<std::pair<int, double> > > tsne_nns(ptr->nobs());
-    {
-        int tsne_k = std::ceil(tsne_perplexity *3); // TODO: replace with thing.
-        #pragma omp parallel for
-        for (size_t i = 0; i < tsne_nns.size(); ++i) {
-            tsne_nns[i] = ptr->find_nearest_neighbors(i, tsne_k);
-        }
-    }
-
-    std::vector<std::vector<std::pair<int, float> > > umap_nns(ptr->nobs());
-    #pragma omp parallel for
-    for (size_t i = 0; i < umap_nns.size(); ++i) {
-        auto current = ptr->find_nearest_neighbors(i, umap_neighbors);
-        for (const auto& x : current) {
-            umap_nns[i].emplace_back(x.first, x.second);
-        }
-    }
-
+    // Running all remaining steps in parallel threads.
     std::vector<double> tsne_output = qdtsne::initialize_random<>(ptr->nobs());
     std::vector<float> umap_output(ptr->nobs() * 2);
+    std::vector<int> best_clustering;
+    scran::ScoreMarkers::Results<double> marker_res;
 
-    omp_set_nested(1);
-    #pragma omp parallel num_threads(3)
-    {
-        if (omp_get_thread_num() == 0) {
-            omp_set_num_threads(nthreads);
+    std::thread first([&]() -> void {
+        auto snn_graph = scran::BuildSNNGraph().set_weighting_scheme(snn_scheme).run(snn_nns);
+        auto clust_res = scran::ClusterSNNGraphMultiLevel().set_resolution(snn_res).run(snn_nns.size(), snn_graph);
+        best_clustering = clust_res.membership[clust_res.max];
+        marker_res = scran::ScoreMarkers().run(normalized.get(), best_clustering.data());
+    });
 
-            // Performing clustering.
-            auto snn_graph = scran::BuildSNNGraph().set_weighting_scheme(snn_scheme).run(snn_nns);
-            auto clust_res = scran::ClusterSNNGraphMultiLevel().set_resolution(snn_res).run(snn_nns.size(), snn_graph);
-            const auto& best_clustering = clust_res.membership[clust_res.max];
+    std::thread second([&]() -> void {
+        qdtsne::Tsne<>().set_perplexity(tsne_perplexity).set_max_iter(tsne_iterations).run(tsne_nns, tsne_output.data());
+    });
 
-            // Throw in some marker detection.
-            auto marker_res = scran::ScoreMarkers().run(normalized.get(), best_clustering.data());
-        } else if (omp_get_thread_num() == 1) {
-            omp_set_num_threads(1);
-            qdtsne::Tsne<>().set_perplexity(tsne_perplexity).set_max_iter(tsne_iterations).run(tsne_nns, tsne_output.data());
-        } else {
-            omp_set_num_threads(1);
-            umappp::Umap<float>().set_min_dist(umap_mindist).set_num_epochs(umap_epochs).run(umap_nns, 2, umap_output.data());
-        }
-    }
+    std::thread third([&]() -> void {
+        umappp::Umap<float>().set_min_dist(umap_mindist).set_num_epochs(umap_epochs).run(umap_nns, 2, umap_output.data());
+    });
+
+    first.join();
+    second.join();
+    third.join();
 
     return 0;
 }

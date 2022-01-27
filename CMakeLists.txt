@@ -13,7 +13,7 @@ include(FetchContent)
 FetchContent_Declare(
   libscran
   GIT_REPOSITORY https://github.com/LTLA/libscran
-  GIT_TAG master # or any version of interest 
+  GIT_TAG ec6219d629b5ecaea0e32d5cd34ab1b6fa3626ba
 )
 
 FetchContent_MakeAvailable(libscran)
@@ -29,7 +29,7 @@ FetchContent_MakeAvailable(cli11)
 FetchContent_Declare(
   qdtsne
   GIT_REPOSITORY https://github.com/LTLA/qdtsne
-  GIT_TAG e189c57980b36a6f337af8e562804f97963bb26f
+  GIT_TAG 73480b9784f970c9477edd8eec6f431d2e06e5cd
 )
 FetchContent_MakeAvailable(qdtsne)
 
@@ -46,9 +46,6 @@ add_executable(scrancli src/main.cpp)
 set_target_properties(scrancli PROPERTIES OUTPUT_NAME "scran")
 
 target_link_libraries(scrancli scran qdtsne umappp CLI11::CLI11)
-
-find_package(OpenMP)
-target_link_libraries(scrancli OpenMP::OpenMP_CXX)
 
 find_package(ZLIB)
 target_link_libraries(scrancli ZLIB::ZLIB)
