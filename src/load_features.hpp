@@ -53,42 +53,43 @@ struct LineProcessor {
     std::vector<typename std::invoke_result<Function, const char*, const char*>::type> collected;
 };
 
-inline std::vector<std::pair<std::string, std::string> > load_features(const char* path, size_t buffer_size = 65536) {
-    LineProcessor loader([](auto begin, auto end) 
-        -> std::pair<std::string, std::string> {
-            auto copy = begin;
-            while (copy < end && *copy != '\t') {
-                ++copy;
-            }
-            std::string ensembl(begin, copy);
-
-            begin = copy;
-            while (copy < end && *copy != '\t') {
-                ++copy;
-            }
-            std::string symbol(begin, copy);
-
-            return std::make_pair(ensembl, symbol);
+std::vector<std::pair<std::string, std::string> > load_features(std::string path) {
+    auto reader = [](auto start, auto end) -> std::pair<std::string, std::string> {
+        auto copy = start;
+        while (copy != end && *copy != '\t') {
+            ++copy;
         }
-    );
+        std::string id(start, copy);
+
+        if (copy != end) {
+            ++copy; // skip the tab.
+        }
+
+        start = copy;
+        while (copy != end && *copy != '\t') {
+            ++copy;
+        }
+        std::string sym(start, copy);
+
+        return std::make_pair(id, sym);
+    };
 
     char header[3];
     size_t read;
     {
-        FILE* handle = std::fopen(path, "rb");
-        read = std::fread(header, sizeof(char), 3, handle);
-        std::fclose(handle);
+        buffin::SelfClosingFILE file(path.c_str());
+        read = std::fread(header, sizeof(char), 3, file.handle);
     }
 
-    if (read == 3 && header[0] == 0x1f && header[1] == 0x8b && header[2] == 0x08) {
-        buffin::parse_gzip_file(path, loader, buffer_size);
+    LineProcessor parser(reader);
+    if (read == 3 && static_cast<unsigned char>(header[0]) == 0x1f && static_cast<unsigned char>(header[1]) == 0x8b && static_cast<unsigned char>(header[2]) == 0x08) {
+        buffin::parse_gzip_file(path.c_str(), parser);
     } else {
-        buffin::parse_text_file(path, loader, buffer_size);
+        buffin::parse_text_file(path.c_str(), parser);
     }
-    
-    loader.finish();
-    return loader.collected;
-}
 
+    parser.finish();
+    return parser.collected;
+}
 
 #endif
