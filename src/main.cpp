@@ -52,6 +52,8 @@ void run_parallel(int total, Function fun) {
   namespace fs = std::experimental::filesystem;
 #endif
 
+#include "load_features.hpp"
+
 int main(int argc, char* argv []) {
     /******************************
      *** Parsing the arguments. ***
@@ -60,7 +62,8 @@ int main(int argc, char* argv []) {
     CLI::App app{"Single-cell RNA-seq analyses on the command-line"};
     
     std::string path;
-    app.add_option("path", path, "Path to the Matrix Market file")->required();
+    app.add_option("matrix", path, "Path to the Matrix Market file")->required();
+    app.add_option("genes", path, "Path to the gene annotation file")->required();
 
     double nthreads;
     app.add_option("-t,--nthreads", nthreads, "Number of threads to use (+2 for UMAP and t-SNE, which use their own threads)")
@@ -73,6 +76,14 @@ int main(int argc, char* argv []) {
     bool skip_output;
     app.add_flag("--skip-output", skip_output, "Run the analysis but do not save results")
         ->default_val(false);
+
+    bool default_mito;
+    app.add_option("--qc-default-mito", default_mito, "Use the internal default set of mitochondrial genes")
+        ->default_val(true);
+
+    std::string mito_prefix;
+    app.add_option("--qc-mito-prefix", mito_prefix, "Prefix for the mitochondrial genes, if the default set is not used")
+        ->default_val("mt-");
 
     double nmads;
     app.add_option("--qc-nmads", nmads, "Number of MADs to use for filtering")
