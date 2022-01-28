@@ -1,2 +1,4 @@
+output/
+*.gz
 build/
 *.swp
