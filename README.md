@@ -4,34 +4,68 @@ This repository provides a no-frills command-line interface for single-cell RNA-
 It is mostly intended for testing performance of the underlying C++ libraries without needing to fiddle with data analysis frameworks like R or Python.
 To build, just:
 
-```
-cmake -S . -B build
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-This will produce a `scran` executable in `build`, which can be executed to obtain a help page:
+This will produce a `scran` executable in `build`, which can be run on the command line:
 
+```bash
+./build/scran --help
+## Single-cell RNA-seq analyses on the command-line
+## Usage: ./build/scran [OPTIONS] path
+## 
+## Positionals:
+##   path TEXT REQUIRED          Path to the Matrix Market file
+## 
+## Options:
+##   -h,--help                   Print this help message and exit
+##   -t,--nthreads FLOAT=1       Number of threads to use (+2 for UMAP and t-SNE, which use their own threads)
+##   -o,--output TEXT=output     Path to the output directory
+##   --skip-output BOOLEAN=0     Run the analysis but do not save results
+##   --qc-nmads FLOAT=3          Number of MADs to use for filtering
+##   --hvg-span FLOAT=0.4        LOWESS span for variance modelling
+##   --hvg-num INT=2500          Number of HVGs to use for PCA
+##   --pca-num INT=25            Number of PCs to keep
+##   --nn-approx BOOLEAN=1       Whether to use an approximate neighbor search
+##   --snn-neighbors INT=10      Number of neighbors to use for the SNN graph
+##   --snn-scheme ENUM:value in {jaccard->2,number->1,ranked->0} OR {2,1,0}=0
+##                               Edge weighting scheme: ranked, number or jaccard
+##   --snn-res FLOAT=1           Resolution to use in multi-level community detection
+##   --tsne-perplexity FLOAT=30  Perplexity to use in t-SNE
+##   --tsne-iter INT=500         Number of iterations to use in t-SNE
+##   --umap-neighbors INT=15     Number of neighbors to use in the UMAP
+##   --umap-mindist FLOAT=0.01   Minimum distance to use in the UMAP
+##   --umap-epochs INT=500       Number of epochs to use in the UMAP
 ```
-$ ./build/scran --help
-Single-cell RNA-seq analyses on the command-line
-Usage: ./build/scran [OPTIONS] path
 
-Positionals:
-  path TEXT REQUIRED          Path to the Matrix Market file
+To illustrate, we'll use the Bach mammary dataset (25k cells) [here](https://github.com/clusterfork/random-test-files).
+Running with 8 threads and omitting the output, we can do:
 
-Options:
-  -h,--help                   Print this help message and exit
-  --qc-nmads FLOAT=3          Number of MADs to use for filtering
-  --hvg-span FLOAT=0.4        LOWESS span for variance modelling
-  --hvg-num INT=2500          Number of HVGs to use for PCA
-  --pca-num INT=25            Number of PCs to keep
-  --nn-approx BOOLEAN=1       Whether to use an approximate neighbor search
-  --snn-neighbors INT=10      Number of neighbors to use for the SNN graph
-  --snn-scheme ENUM:value in {jaccard->2,number->1,ranked->0} OR {2,1,0}=0
-                              Edge weighting scheme: ranked, number or jaccard
-  --tsne-perplexity FLOAT=30  Perplexity to use in t-SNE
-  --tsne-iter INT=500         Number of iterations to use in t-SNE
-  --umap-neighbors INT=15     Number of neighbors to use in the UMAP
-  --umap-mindist FLOAT=0.01   Minimum distance to use in the UMAP
-  --umap-epochs INT=500       Number of epochs to use in the UMAP
+```sh
+time ./build/scran -t 8 --skip-output matrix.mtx.gz 
+## Initializing matrix... 8.762s
+## Computing QC metrics... 0.026s
+## Computing QC thresholds... 0.002s
+## Filtering cells... 0s
+## Log-normalizing the counts... 0s
+## Mean-variance modelling... 0.251s
+## Principal components analysis... 12.245s
+## Building the neighbor index... 1.142s
+## Finding neighbors for clustering... 0.347s
+## Finding neighbors for t-SNE... 1.558s
+## Finding neighbors for UMAP... 0.418s
+## SNN graph construction... 0.068s
+## Multi-level clustering... 4.57s
+## Marker detection... 3.314s
+## UMAP calculation... 21.141s
+## t-SNE calculation... 28.357s
+## 
+## real	0m53.146s
+## user	1m55.276s
+## sys	0m0.865s
 ```
+
+If we were to keep the output (which is the default behavior), we would get a directory at the specified `output` path.
+This contains QC metrics, variance modelling results, PCA coordinates, cluster assignments, UMAP/t-SNE values and marker statistics for each cluster.
