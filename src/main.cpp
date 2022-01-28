@@ -7,6 +7,7 @@
 #include <thread>
 #include <iostream>
 #include <chrono>
+#include <fstream>
 
 int nthreads_global = 1;
 
@@ -38,8 +39,24 @@ void run_parallel(int total, Function fun) {
 #include "qdtsne/qdtsne.hpp"
 #include "umappp/Umap.hpp"
 
+#ifdef __has_include
+  #if __has_include(<filesystem>)
+    #include <filesystem>
+    namespace fs = std::filesystem;
+  #else
+    #include <experimental/filesystem>
+    namespace fs = std::experimental::filesystem;
+  #endif
+#else
+  #include <experimental/filesystem>
+  namespace fs = std::experimental::filesystem;
+#endif
+
 int main(int argc, char* argv []) {
-    /** Parsing the arguments. **/
+    /******************************
+     *** Parsing the arguments. ***
+     ******************************/
+
     CLI::App app{"Single-cell RNA-seq analyses on the command-line"};
     
     std::string path;
@@ -48,6 +65,14 @@ int main(int argc, char* argv []) {
     double nthreads;
     app.add_option("-t,--nthreads", nthreads, "Number of threads to use (+2 for UMAP and t-SNE, which use their own threads)")
         ->default_val(1);
+    
+    std::string output;
+    app.add_option("-o,--output", output, "Path to the output directory")
+        ->default_val("output");
+
+    bool skip_output;
+    app.add_flag("--skip-output", skip_output, "Run the analysis but do not save results")
+        ->default_val(false);
 
     double nmads;
     app.add_option("--qc-nmads", nmads, "Number of MADs to use for filtering")
@@ -108,6 +133,10 @@ int main(int argc, char* argv []) {
         ->default_val(500);
 
     CLI11_PARSE(app, argc, argv);
+
+    /********************************
+     *** Performing the analysis. ***
+     ********************************/
 
     // Setting up some bits and pieces.
     nthreads_global = nthreads;
@@ -246,6 +275,132 @@ int main(int argc, char* argv []) {
     first.join();
     second.join();
     third.join();
+
+    /***************************
+     *** Saving the results. ***
+     ***************************/
+
+    if (skip_output) {
+        return 0;
+    }
+
+    fs::create_directories(output);
+    
+    // QC results.
+    {
+        std::ofstream handle(output + "/qc_metrics.tsv");
+        handle << "sums\tdetected\n";
+        auto def = std::cout.precision();
+        for (size_t i = 0; i < qc_res.sums.size(); ++i) {
+            handle << std::setprecision(def) << qc_res.sums[i] << "\t" << qc_res.detected[i] << "\n"; // std::setprecision(4) << "\n";
+        }
+        handle << std::flush;
+    }
+
+    {
+        std::ofstream handle(output + "/qc_thresholds.tsv");
+        handle << std::setprecision(6);
+        handle << "sums\t" << qc_filters.thresholds.sums[0] << "\n";
+        handle << "detected\t" << qc_filters.thresholds.detected[0] << "\n";
+        handle << std::flush;
+    }
+
+    {
+        std::ofstream handle(output + "/qc_discard.tsv");
+        handle << std::setprecision(6);
+        handle << "sums\tdetected\toverall\n";
+        for (size_t i = 0; i < qc_filters.filter_by_sums.size(); ++i) {
+            handle << qc_filters.filter_by_sums[i] << "\t" 
+                << qc_filters.filter_by_detected[i] << "\t" 
+                << qc_filters.overall_filter[i] << "\n";
+        }
+        handle << std::flush;
+    }
+
+    // Mean-variance results.
+    auto perm = mat.permutation;
+    {
+        std::ofstream handle(output + "/variances.tsv");
+        handle << std::setprecision(6);
+        handle << "mean\tvariance\tfitted\tresid\n";
+        for (auto i : perm) {
+            handle << var_res.means[0][i] << "\t" 
+                << var_res.variances[0][i] << "\t"
+                << var_res.fitted[0][i] << "\t"
+                << var_res.residuals[0][i] << "\n";
+        }
+        handle << std::flush;
+    }
+
+    // PCA-related results.
+    {
+        std::ofstream handle(output + "/pca.tsv");
+        handle << std::setprecision(6);
+        for (size_t i = 0; i < pca_res.pcs.cols(); ++i) {
+            handle << pca_res.pcs(0, i); 
+            for (size_t j = 1; j < pca_res.pcs.rows(); ++j) {
+                handle << "\t" << pca_res.pcs(j, i);
+            }
+            handle << "\n";
+        }
+        handle << std::flush;
+    }
+
+    {
+        std::ofstream handle(output + "/pca_varexp.tsv");
+        handle << std::setprecision(6);
+        for (auto v : pca_res.variance_explained) {
+            handle << v / pca_res.total_variance << "\n";
+        }
+        handle << std::flush;
+    }
+
+    // Clustering results.
+    {
+        std::ofstream handle(output + "/snn_cluster_multilevel.tsv");
+        for (auto i : best_clustering) {
+            handle << i << "\n";
+        }
+        handle << std::flush;
+    }
+
+    // Marker results.
+    {
+        fs::create_directory(output + "/markers");
+        for (size_t i = 0; i < marker_res.means.size(); ++i) {
+            std::ofstream handle(output + "/markers/" + std::to_string(i) + ".tsv");
+            handle << "mean\tdetected\tlfc\tdelta_detected\tcohen\tauc\n";
+            handle << std::setprecision(6);
+            for (auto j : perm) {
+                handle << marker_res.means[i][0][j] << "\t" 
+                    << marker_res.detected[i][0][j] << "\t"
+                    << marker_res.lfc[scran::differential_analysis::MEAN][i][j] << "\t"
+                    << marker_res.delta_detected[scran::differential_analysis::MEAN][i][j] << "\t"
+                    << marker_res.cohen[scran::differential_analysis::MEAN][i][j] << "\t"
+                    << marker_res.auc[scran::differential_analysis::MEAN][i][j] << "\n";
+            }
+            handle << std::flush;
+        }
+    }
+
+    // Dimensionality reduction results.
+    {
+        std::ofstream handle(output + "/tsne.tsv");
+        handle << std::setprecision(6);
+        for (size_t i = 0; i < ptr->nobs(); ++i) {
+            handle << tsne_output[2*i] << "\t" << tsne_output[2*i + 1] << "\n";
+        }
+        handle << std::flush;
+    }
+
+    {
+        std::ofstream handle(output + "/umap.tsv");
+        handle << std::setprecision(6);
+        for (size_t i = 0; i < ptr->nobs(); ++i) {
+            handle << umap_output[2*i] << "\t" << umap_output[2*i + 1] << "\n";
+        }
+        handle << std::flush;
+    }
 
     return 0;
 }

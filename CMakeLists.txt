@@ -47,6 +47,12 @@ set_target_properties(scrancli PROPERTIES OUTPUT_NAME "scran")
 
 target_link_libraries(scrancli scran qdtsne umappp CLI11::CLI11)
 
+include(CheckIncludeFiles)
+check_include_files(filesystem HAVE_CXX_FS)
+if (NOT HAVE_CXX_FS) 
+    target_link_libraries(scrancli stdc++fs)
+endif()
+
 find_package(ZLIB)
 target_link_libraries(scrancli ZLIB::ZLIB)
 target_compile_definitions(scrancli PRIVATE TATAMI_USE_ZLIB=1)
