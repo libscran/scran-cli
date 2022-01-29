@@ -52,6 +52,9 @@ void run_parallel(int total, Function fun) {
   namespace fs = std::experimental::filesystem;
 #endif
 
+#include "load_features.hpp"
+#include "mito.h"
+
 int main(int argc, char* argv []) {
     /******************************
      *** Parsing the arguments. ***
@@ -60,7 +63,9 @@ int main(int argc, char* argv []) {
     CLI::App app{"Single-cell RNA-seq analyses on the command-line"};
     
     std::string path;
-    app.add_option("path", path, "Path to the Matrix Market file")->required();
+    app.add_option("matrix", path, "Path to the Matrix Market file")->required();
+    std::string gpath;
+    app.add_option("genes", gpath, "Path to the gene annotation file")->required();
 
     double nthreads;
     app.add_option("-t,--nthreads", nthreads, "Number of threads to use (+2 for UMAP and t-SNE, which use their own threads)")
@@ -73,6 +78,14 @@ int main(int argc, char* argv []) {
     bool skip_output;
     app.add_flag("--skip-output", skip_output, "Run the analysis but do not save results")
         ->default_val(false);
+
+    bool default_mito;
+    app.add_option("--qc-default-mito", default_mito, "Use the internal default set of mitochondrial genes")
+        ->default_val(true);
+
+    std::string mito_prefix;
+    app.add_option("--qc-mito-prefix", mito_prefix, "Prefix for the mitochondrial genes, if the default set is not used")
+        ->default_val("mt-");
 
     double nmads;
     app.add_option("--qc-nmads", nmads, "Number of MADs to use for filtering")
@@ -147,21 +160,54 @@ int main(int argc, char* argv []) {
     };
 
     // Loading the data from an MatrixMarket file.
-    std::cout << "Initializing matrix... " << std::flush;
-    auto start = std::chrono::high_resolution_clock::now();
-    size_t n = path.size();
     tatami::LayeredMatrixData<double, int> mat;
-    if (n > 3 && path[n-3] == '.' && path[n-2] == 'g' && path[n-1] == 'z') {
-        mat = tatami::MatrixMarket::load_layered_sparse_matrix_gzip(path.c_str());
-    } else {
-        mat = tatami::MatrixMarket::load_layered_sparse_matrix(path.c_str());
+    {
+        std::cout << "Initializing matrix... " << std::flush;
+        auto start = std::chrono::high_resolution_clock::now();
+        size_t n = path.size();
+        if (n > 3 && path[n-3] == '.' && path[n-2] == 'g' && path[n-1] == 'z') {
+            mat = tatami::MatrixMarket::load_layered_sparse_matrix_gzip(path.c_str());
+        } else {
+            mat = tatami::MatrixMarket::load_layered_sparse_matrix(path.c_str());
+        }
+        declare(start);
     }
-    declare(start);
+
+    // Loading data from the gene feature file.
+    std::vector<std::pair<std::string, std::string> > genes;
+    {
+        std::cout << "Initializing gene annotation... " << std::flush;
+        auto start = std::chrono::high_resolution_clock::now();
+        genes = load_features(gpath);
+        declare(start);
+    }
+
+    // Deriving mitochondrial subsets.
+    std::vector<uint8_t> mito(mat.matrix->nrow());
+    if (default_mito) {
+        size_t i = 0;
+        for (const auto& p : genes) {
+            if (mito_ensembl.find(p.first) != mito_ensembl.end() || mito_symbols.find(p.second) != mito_symbols.end()) {
+                mito[mat.permutation[i]] = 1;
+            }
+            ++i;
+        }
+    } else {
+        size_t i = 0;
+        for (const auto& p : genes) {
+            if (p.first.size() >= mito_prefix.size() && p.first.compare(0, mito_prefix.size(), mito_prefix) == 0) {
+                mito[mat.permutation[i]] = 1;
+            } else if (p.second.size() >= mito_prefix.size() && p.second.compare(0, mito_prefix.size(), mito_prefix) == 0) {
+                mito[mat.permutation[i]] = 1;
+            }
+            ++i;
+        }
+    }
 
     // Filtering out low-quality cells. 
     std::cout << "Computing QC metrics... " << std::flush;
-    start = std::chrono::high_resolution_clock::now();
-    auto qc_res = scran::PerCellQCMetrics().run(mat.matrix.get(), { /* mito subset definitions go here */ });
+    auto start = std::chrono::high_resolution_clock::now();
+    auto qc_res = scran::PerCellQCMetrics().run(mat.matrix.get(), { mito.data() });
     declare(start);
 
     std::cout << "Computing QC thresholds... " << std::flush;
@@ -289,10 +335,11 @@ int main(int argc, char* argv []) {
     // QC results.
     {
         std::ofstream handle(output + "/qc_metrics.tsv");
-        handle << "sums\tdetected\n";
+        handle << "sums\tdetected\tmito_proportions\n";
         auto def = std::cout.precision();
         for (size_t i = 0; i < qc_res.sums.size(); ++i) {
-            handle << std::setprecision(def) << qc_res.sums[i] << "\t" << qc_res.detected[i] << "\n"; // std::setprecision(4) << "\n";
+            handle << std::setprecision(def) << qc_res.sums[i] << "\t" << qc_res.detected[i] << "\t";
+            handle << std::setprecision(6) << qc_res.subset_proportions[0][i] << "\n";
         }
         handle << std::flush;
     }
@@ -302,32 +349,36 @@ int main(int argc, char* argv []) {
         handle << std::setprecision(6);
         handle << "sums\t" << qc_filters.thresholds.sums[0] << "\n";
         handle << "detected\t" << qc_filters.thresholds.detected[0] << "\n";
+        handle << "mito_proportions\t" << qc_filters.thresholds.subset_proportions[0][0] << "\n";
         handle << std::flush;
     }
 
     {
         std::ofstream handle(output + "/qc_discard.tsv");
         handle << std::setprecision(6);
-        handle << "sums\tdetected\toverall\n";
+        handle << "sums\tdetected\tmito_proportions\toverall\n";
         for (size_t i = 0; i < qc_filters.filter_by_sums.size(); ++i) {
-            handle << qc_filters.filter_by_sums[i] << "\t" 
-                << qc_filters.filter_by_detected[i] << "\t" 
-                << qc_filters.overall_filter[i] << "\n";
+            handle << static_cast<int>(qc_filters.filter_by_sums[i]) << "\t" 
+                << static_cast<int>(qc_filters.filter_by_detected[i]) << "\t" 
+                << static_cast<int>(qc_filters.filter_by_subset_proportions[0][i]) << "\t" 
+                << static_cast<int>(qc_filters.overall_filter[i]) << "\n";
         }
         handle << std::flush;
     }
 
     // Mean-variance results.
-    auto perm = mat.permutation;
     {
         std::ofstream handle(output + "/variances.tsv");
         handle << std::setprecision(6);
-        handle << "mean\tvariance\tfitted\tresid\n";
-        for (auto i : perm) {
-            handle << var_res.means[0][i] << "\t" 
-                << var_res.variances[0][i] << "\t"
-                << var_res.fitted[0][i] << "\t"
-                << var_res.residuals[0][i] << "\n";
+        handle << "id\tsymbol\tmean\tvariance\tfitted\tresid\n";
+        for (size_t i = 0; i < mat.permutation.size(); ++i) {
+            auto p = mat.permutation[i];
+            handle << genes[i].first << "\t" 
+                << genes[i].second << "\t"
+                << var_res.means[0][p] << "\t" 
+                << var_res.variances[0][p] << "\t"
+                << var_res.fitted[0][p] << "\t"
+                << var_res.residuals[0][p] << "\n";
         }
         handle << std::flush;
     }
@@ -371,13 +422,16 @@ int main(int argc, char* argv []) {
             std::ofstream handle(output + "/markers/" + std::to_string(i) + ".tsv");
             handle << "mean\tdetected\tlfc\tdelta_detected\tcohen\tauc\n";
             handle << std::setprecision(6);
-            for (auto j : perm) {
-                handle << marker_res.means[i][0][j] << "\t" 
-                    << marker_res.detected[i][0][j] << "\t"
-                    << marker_res.lfc[scran::differential_analysis::MEAN][i][j] << "\t"
-                    << marker_res.delta_detected[scran::differential_analysis::MEAN][i][j] << "\t"
-                    << marker_res.cohen[scran::differential_analysis::MEAN][i][j] << "\t"
-                    << marker_res.auc[scran::differential_analysis::MEAN][i][j] << "\n";
+            for (size_t j = 0; j < mat.permutation.size(); ++j) {
+                auto p = mat.permutation[j];
+                handle << genes[j].first << "\t" 
+                    << genes[j].second << "\t"
+                    << marker_res.means[i][0][p] << "\t" 
+                    << marker_res.detected[i][0][p] << "\t"
+                    << marker_res.lfc[scran::differential_analysis::MEAN][i][p] << "\t"
+                    << marker_res.delta_detected[scran::differential_analysis::MEAN][i][p] << "\t"
+                    << marker_res.cohen[scran::differential_analysis::MEAN][i][p] << "\t"
+                    << marker_res.auc[scran::differential_analysis::MEAN][i][p] << "\n";
             }
             handle << std::flush;
         }

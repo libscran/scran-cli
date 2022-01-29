@@ -41,7 +41,10 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(umappp)
 
 # Building the application.
-add_executable(scrancli src/main.cpp)
+add_executable(scrancli 
+    src/main.cpp
+    src/mito.cpp
+)
 
 set_target_properties(scrancli PROPERTIES OUTPUT_NAME "scran")
 
