@@ -185,7 +185,7 @@ int main(int argc, char* argv []) {
     std::cout << "Mean-variance modelling... " << std::flush;
     start = std::chrono::high_resolution_clock::now();
     auto var_res = scran::ModelGeneVar().set_span(span).run(normalized.get());
-    auto keep = scran::ChooseHVGs().set_top(nhvgs).run(var_res.residuals.size(), var_res.residuals.data());
+    auto keep = scran::ChooseHVGs().set_top(nhvgs).run(var_res.residuals[0].size(), var_res.residuals[0].data());
     declare(start);
 
     // Performing a PCA on the HVGs. We transpose the output so cells are columns again.
