@@ -358,10 +358,10 @@ int main(int argc, char* argv []) {
         handle << std::setprecision(6);
         handle << "sums\tdetected\tmito_proportions\toverall\n";
         for (size_t i = 0; i < qc_filters.filter_by_sums.size(); ++i) {
-            handle << qc_filters.filter_by_sums[i] << "\t" 
-                << qc_filters.filter_by_detected[i] << "\t" 
-                << qc_filters.filter_by_subset_proportions[0][i] << "\t" 
-                << qc_filters.overall_filter[i] << "\n";
+            handle << static_cast<int>(qc_filters.filter_by_sums[i]) << "\t" 
+                << static_cast<int>(qc_filters.filter_by_detected[i]) << "\t" 
+                << static_cast<int>(qc_filters.filter_by_subset_proportions[0][i]) << "\t" 
+                << static_cast<int>(qc_filters.overall_filter[i]) << "\n";
         }
         handle << std::flush;
     }
