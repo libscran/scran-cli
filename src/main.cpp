@@ -80,7 +80,7 @@ int main(int argc, char* argv []) {
 
     double span;
     app.add_option("--hvg-span", span, "LOWESS span for variance modelling")
-        ->default_val(0.4);
+        ->default_val(0.3);
 
     int nhvgs;
     app.add_option("--hvg-num", nhvgs, "Number of HVGs to use for PCA")
@@ -110,7 +110,7 @@ int main(int argc, char* argv []) {
 
     double snn_res;
     app.add_option("--snn-res", snn_res, "Resolution to use in multi-level community detection")
-        ->default_val(1);
+        ->default_val(0.5);
 
     double tsne_perplexity;
     app.add_option("--tsne-perplexity", tsne_perplexity, "Perplexity to use in t-SNE")
