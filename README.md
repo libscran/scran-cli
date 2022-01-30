@@ -44,27 +44,28 @@ To illustrate, we'll use the Bach mammary dataset (25k cells) [here](https://git
 Running with 8 threads and omitting the output, we can do:
 
 ```sh
-time ./build/scran -t 8 --skip-output matrix.mtx.gz 
-## Initializing matrix... 8.762s
-## Computing QC metrics... 0.026s
-## Computing QC thresholds... 0.002s
+time ../../build/scran -t 8 --skip-output matrix.mtx.gz features.tsv.gz
+## Initializing matrix... 9.084s
+## Initializing gene annotation... 0.01s
+## Computing QC metrics... 0.071s
+## Computing QC thresholds... 0.003s
 ## Filtering cells... 0s
 ## Log-normalizing the counts... 0s
-## Mean-variance modelling... 0.251s
-## Principal components analysis... 12.245s
-## Building the neighbor index... 1.142s
-## Finding neighbors for clustering... 0.347s
-## Finding neighbors for t-SNE... 1.558s
-## Finding neighbors for UMAP... 0.418s
-## SNN graph construction... 0.068s
-## Multi-level clustering... 4.57s
-## Marker detection... 3.314s
-## UMAP calculation... 21.141s
-## t-SNE calculation... 28.357s
+## Mean-variance modelling... 0.287s
+## Principal components analysis... 7.805s
+## Building the neighbor index... 1.137s
+## Finding neighbors for clustering... 0.345s
+## Finding neighbors for t-SNE... 1.317s
+## Finding neighbors for UMAP... 0.413s
+## SNN graph construction... 0.067s
+## Multi-level clustering... 3.774s
+## Marker detection... 3.443s
+## UMAP calculation... 21.993s
+## t-SNE calculation... 28.989s
 ## 
-## real	0m53.146s
-## user	1m55.276s
-## sys	0m0.865s
+## real	0m49.508s
+## user	1m53.869s
+## sys	0m0.604s
 ```
 
 If we were to keep the output (which is the default behavior), we would get a directory at the specified `output` path.
