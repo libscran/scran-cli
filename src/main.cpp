@@ -302,7 +302,7 @@ int main(int argc, char* argv []) {
 
     std::thread second([&]() -> void {
         auto start = std::chrono::high_resolution_clock::now();
-        qdtsne::Tsne<>().set_perplexity(tsne_perplexity).set_max_iter(tsne_iterations).run(tsne_nns, tsne_output.data());
+        qdtsne::Tsne<>().set_perplexity(tsne_perplexity).set_max_iter(tsne_iterations).set_max_depth(7).run(tsne_nns, tsne_output.data());
         cout_lock.lock();
         std::cout << "t-SNE calculation... " << std::flush;
         declare(start);
