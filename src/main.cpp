@@ -31,6 +31,24 @@ std::vector<int> split_mito_list(const std::string& mito_list) {
     std::vector<int> output;
     int current = 0;
     bool empty = true;
+    bool range = false;
+
+    auto push = [&]() {
+        if (empty) {
+            throw std::runtime_error("empty row index in the mitochondrial list");
+        }
+
+        if (range) {
+            for (int last = output.back(); last <= current; ++last) {
+                output.push_back(last);
+            }
+        } else {
+            output.push_back(current);
+        }
+
+        current = 0;
+        empty = true;
+    };
 
     for (auto x : mito_list) {
         switch (x) {
@@ -40,23 +58,19 @@ std::vector<int> split_mito_list(const std::string& mito_list) {
                 empty = false;
                 break;
             case ',': 
-                if (empty) {
-                    throw std::runtime_error("empty row index in the mitochondrial list");
-                }
-                output.push_back(current);
-                current = 0;
-                empty = true;
+                push();
+                range = false;
+                break;
+            case '-':
+                push();
+                range = true;
                 break;
             default:
                 throw std::runtime_error(std::string("unknown character '") + x + "' in the mitochondrial list");
         }
     }
 
-    if (empty) {
-        throw std::runtime_error("empty row index in the mitochondrial list");
-    } else {
-        output.push_back(current);
-    }
+    push();
     return output;
 }
 
@@ -137,6 +151,7 @@ int main(int argc, char* argv []) {
     auto start = std::chrono::high_resolution_clock::now();
     auto mat = tatami_mtx::load_matrix_from_some_file<double, int>(all_opt.file_path.c_str(), [&]{
         tatami_mtx::Options opt;
+        opt.row = false; // faster loading with default 10X MTX files!
         opt.parallel = (all_opt.num_threads > 1);
         return opt;
     }());
@@ -259,7 +274,8 @@ int main(int argc, char* argv []) {
         auto status = qdtsne::initialize<2>(std::move(tsne_nns), [&]{
             qdtsne::Options opt;
             opt.perplexity = all_opt.tsne_perplexity;
-            opt.num_threads = all_opt.num_threads;
+            opt.max_iterations = all_opt.tsne_iterations;
+            opt.max_depth = 7; // using some approximations for a faster runtime.
             return opt;
         }());
         status.run(tsne_output.data());
