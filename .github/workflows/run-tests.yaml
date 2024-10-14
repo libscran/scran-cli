@@ -1,0 +1,65 @@
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+name: Build the tool
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+
+    - name: Cache installed
+      id: installed
+      uses: actions/cache@v4
+      with:
+        path: extern/installed
+        key: deps-${{ hashFiles('extern/**/build.sh') }}
+
+    - name: Build igraph
+      if: steps.installed.outputs.cache-hit != 'true'
+      run: |
+        cd extern/igraph
+        bash build.sh
+
+    - name: Prepare the build
+      run: |
+        cmake \
+            -S . \
+            -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=extern/installed
+
+    - name: Check all transitive dependencies are pinned
+      run: |
+        cat extern/CMakeLists.txt | \
+            grep "FetchContent_MakeAvailable" | \
+            sed "s/FetchContent_MakeAvailable(//" | \
+            sed "s/)//" | \
+            tr '[:upper:]' '[:lower:]' | \
+            sort > requested.txt
+        ls build/_deps/ | \
+            grep "src$" | \
+            sed "s/-src//" | \
+            sort > observed.txt
+        diffs=$(diff observed.txt requested.txt )
+        if [[ $diffs != '' ]]
+        then
+            exit 1
+        fi
+
+    - name: Compile the tool
+      run: cmake --build build
+
+    - name: Download Zeisel
+      uses: wei/wget@v1
+      with:
+        args: -O matrix.mtx.gz https://github.com/kanaverse/random-test-files/releases/download/zeisel-brain-v1.0.0/matrix.mtx.gz
+
+    - name: Run the tool
+      run: ./build/scran --mito-list 19972-20005 matrix.mtx.gz
