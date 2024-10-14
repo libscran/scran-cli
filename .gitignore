@@ -2,6 +2,6 @@ output/
 *.gz
 build/
 *.swp
-extern/igraph/
+*.txt
 extern/include/
 extern/installed/
