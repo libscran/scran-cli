@@ -1,5 +1,7 @@
 # CLI for single-cell analyses
 
+![Unit tests](https://github.com/libscran/scran-cli/actions/workflows/run-tests.yaml/badge.svg)
+
 ## Overview
 
 This repository implements a command-line tool for single-cell RNA-seq data analysis from a Matrix Market file.
@@ -33,30 +35,31 @@ This will produce a `scran` executable in `build`, which can be run on the comma
 ```bash
 ./build/scran --help
 ## Single-cell RNA-seq analyses on the command-line
-## Usage: ./build/scran [OPTIONS] path
+## Usage: ./build/scran [OPTIONS] counts
 ## 
 ## Positionals:
-##   path TEXT REQUIRED          Path to the Matrix Market file
+##   counts TEXT REQUIRED        Path to the MatrixMarket file containing the counts.
 ## 
 ## Options:
 ##   -h,--help                   Print this help message and exit
-##   -t,--nthreads FLOAT=1       Number of threads to use (+2 for UMAP and t-SNE, which use their own threads)
-##   -o,--output TEXT=output     Path to the output directory
-##   --skip-output BOOLEAN=0     Run the analysis but do not save results
-##   --qc-nmads FLOAT=3          Number of MADs to use for filtering
-##   --hvg-span FLOAT=0.4        LOWESS span for variance modelling
-##   --hvg-num INT=2500          Number of HVGs to use for PCA
-##   --pca-num INT=25            Number of PCs to keep
-##   --nn-approx BOOLEAN=1       Whether to use an approximate neighbor search
-##   --snn-neighbors INT=10      Number of neighbors to use for the SNN graph
-##   --snn-scheme ENUM:value in {jaccard->2,number->1,ranked->0} OR {2,1,0}=0
-##                               Edge weighting scheme: ranked, number or jaccard
-##   --snn-res FLOAT=1           Resolution to use in multi-level community detection
-##   --tsne-perplexity FLOAT=30  Perplexity to use in t-SNE
-##   --tsne-iter INT=500         Number of iterations to use in t-SNE
-##   --umap-neighbors INT=15     Number of neighbors to use in the UMAP
-##   --umap-mindist FLOAT=0.01   Minimum distance to use in the UMAP
-##   --umap-epochs INT=500       Number of epochs to use in the UMAP
+##   -o,--output TEXT [output]   Path to the output directory. If empty, results are not saved.
+##   --mito-list TEXT            Comma-separated list of the 0-based row indices of the mitochondrial genes. Closed intervals are also accepted as 'X-Y'.
+##   --num-mads FLOAT [3]        Number of MADs to use for defining QC thresholds.
+##   --fit-span FLOAT [0.3]      LOWESS span for fitting the mean-variance trend.
+##   --num-hvgs INT [2500]       Number of HVGs to use for PCA.
+##   --num-pcs INT [25]          Number of PCs to keep.
+##   --nn-approx INT [1]         Whether to use an approximate neighbor search.
+##   --snn-neighbors INT [10]    Number of neighbors to use for the SNN graph.
+##   --snn-scheme TEXT:{ranked,number,jaccard} [ranked]
+##                               Edge weighting scheme for SNN graph construction.
+##   --snn-res FLOAT [0.5]       Resolution to use in multi-level community detection.
+##   --tsne-perplexity FLOAT [30]
+##                               Perplexity to use in t-SNE.
+##   --tsne-iter FLOAT [500]     Number of iterations to use in t-SNE.
+##   --umap-neighbors INT [15]   Number of neighbors to use in the UMAP.
+##   --umap-mindist FLOAT [0.1]  Minimum distance to use in the UMAP.
+##   --umap-epochs INT [500]     Number of epochs to use in the UMAP.
+##   -t,--nthreads INT [1]       Number of threads to use (+2 for UMAP and t-SNE, which use their own threads).
 ```
 
 ## Usage instructions

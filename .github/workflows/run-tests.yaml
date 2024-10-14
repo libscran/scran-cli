@@ -1,0 +1,48 @@
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+name: Build the tool
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+
+    - name: Update NPM packages
+      run: npm i --include=dev
+
+    - name: Cache installed
+      id: installed
+      uses: actions/cache@v4
+      with:
+        path: extern/installed
+        key: deps-${{ hashFiles('extern/**/build.sh') }}
+
+    - name: Build igraph
+      if: steps.installed.outputs.cache-hit != 'true'
+      run: |
+        cd extern/igraph
+        bash build.sh
+
+    - name: Build the tool
+      run: |
+        cmake \
+            -S . \
+            -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=extern/igraph
+        cmake --build build
+
+    - name: Add knncolle tagfile
+      uses: wei/wget@v1
+      with:
+        args: -O matrix.mtx.gz https://github.com/kanaverse/random-test-files/releases/download/zeisel-brain-v1.0.0/matrix.mtx.gz
+
+    - name: Run the tool
+      run: ./build/scran --mito-list 19972-20005 matrix.mtx.gz

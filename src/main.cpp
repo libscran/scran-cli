@@ -111,7 +111,7 @@ int main(int argc, char* argv []) {
         app.add_option("counts", all_opt.file_path, "Path to the MatrixMarket file containing the counts.")->required();
         app.add_option("-o,--output", all_opt.output, "Path to the output directory. If empty, results are not saved.")->default_val("output");
 
-        app.add_option("--mito-list", all_opt.mito_list, "Comma-separated list of the 0-based row indices of the mitochondrial genes")->default_val("");
+        app.add_option("--mito-list", all_opt.mito_list, "Comma-separated list of the 0-based row indices of the mitochondrial genes. Closed intervals are also accepted as 'X-Y'.")->default_val("");
         app.add_option("--num-mads", all_opt.num_mads, "Number of MADs to use for defining QC thresholds.")->default_val(3);
 
         app.add_option("--fit-span", all_opt.fit_span, "LOWESS span for fitting the mean-variance trend.")->default_val(0.3);
