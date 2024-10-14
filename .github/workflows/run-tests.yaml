@@ -33,7 +33,7 @@ jobs:
             -S . \
             -B build \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=extern/igraph
+            -DCMAKE_INSTALL_PREFIX=extern/installed
 
     - name: Check all transitive dependencies are pinned
       run: |
