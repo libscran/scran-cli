@@ -77,7 +77,7 @@ int main(int argc, char* argv []) {
         int num_pcs;
 
         int nn_approx;
-        scran_graph_cluster::SnnWeightScheme snn_scheme;
+        std::string snn_scheme;
         int snn_neighbors;
         double snn_resolution;
 
@@ -107,14 +107,9 @@ int main(int argc, char* argv []) {
         app.add_option("--nn-approx", all_opt.nn_approx, "Whether to use an approximate neighbor search.")->default_val(true);
 
         app.add_option("--snn-neighbors", all_opt.snn_neighbors, "Number of neighbors to use for the SNN graph.")->default_val(10);
-        std::map<std::string, scran_graph_cluster::SnnWeightScheme> scheme_map{
-            {"ranked", scran_graph_cluster::SnnWeightScheme::RANKED}, 
-            {"number", scran_graph_cluster::SnnWeightScheme::NUMBER}, 
-            {"jaccard", scran_graph_cluster::SnnWeightScheme::JACCARD}
-        };
-        app.add_option("--snn-scheme", all_opt.snn_scheme, "Edge weighting scheme: ranked, number or jaccard.")
-            ->transform(CLI::CheckedTransformer(scheme_map, CLI::ignore_case))
-            ->default_val(scran_graph_cluster::SnnWeightScheme::RANKED);
+        app.add_option("--snn-scheme", all_opt.snn_scheme, "Edge weighting scheme for SNN graph construction.")
+            ->check(CLI::IsMember({ "ranked", "number", "jaccard" }))
+            ->default_val("ranked");
         app.add_option("--snn-res", all_opt.snn_resolution, "Resolution to use in multi-level community detection.")->default_val(0.5);
 
         app.add_option("--tsne-perplexity", all_opt.tsne_perplexity, "Perplexity to use in t-SNE.")->default_val(30);
@@ -317,7 +312,13 @@ int main(int argc, char* argv []) {
     }
     auto snn_graph = scran_graph_cluster::build_snn_graph(std::move(snn_nns), [&]{
         scran_graph_cluster::BuildSnnGraphOptions opt;
-        opt.weighting_scheme = all_opt.snn_scheme;
+        if (all_opt.snn_scheme == "ranked") {
+            opt.weighting_scheme = scran_graph_cluster::SnnWeightScheme::RANKED;
+        } else if (all_opt.snn_scheme == "jaccard") {
+            opt.weighting_scheme = scran_graph_cluster::SnnWeightScheme::JACCARD;
+        } else {
+            opt.weighting_scheme = scran_graph_cluster::SnnWeightScheme::NUMBER;
+        }
         opt.num_threads = all_opt.num_threads;
         return opt;
     }());
