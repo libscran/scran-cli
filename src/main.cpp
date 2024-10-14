@@ -8,317 +8,347 @@
 #include <iostream>
 #include <chrono>
 #include <fstream>
+#include <filesystem>
+#include <algorithm>
 
-int nthreads_global = 1;
+#include "tatami/tatami.hpp"
+#include "tatami_mtx/tatami_mtx.hpp"
 
-template<class Function>
-void run_parallel(int total, Function fun) {
-    int nworkers = nthreads_global;
-    int jobs_per_worker = std::ceil(static_cast<double>(total)/nworkers);
-    std::vector<std::thread> workers;
-    workers.reserve(nworkers);
-    int first = 0;
+#include "scran_qc/scran_qc.hpp"
+#include "scran_norm/scran_norm.hpp"
+#include "scran_variances/scran_variances.hpp"
+#include "scran_pca/scran_pca.hpp"
+#include "scran_graph_cluster/scran_graph_cluster.hpp"
+#include "scran_markers/scran_markers.hpp"
 
-    for (int w = 0; w < nworkers && first < total; ++w, first += jobs_per_worker) {
-        int last = std::min(first + jobs_per_worker, total);
-        workers.emplace_back(fun, first, last);
-    }
-
-    for (auto& wrk : workers) {
-        wrk.join();
-    }
-}
-
-#define TATAMI_CUSTOM_PARALLEL run_parallel
-#define SCRAN_CUSTOM_PARALLEL run_parallel
-#define KNNCOLLE_CUSTOM_PARALLEL run_parallel
-
-#include "scran/scran.hpp"
-#include "tatami/ext/MatrixMarket_layered.hpp"
+#include "knncolle/knncolle.hpp"
+#include "knncolle_annoy/knncolle_annoy.hpp"
 
 #include "qdtsne/qdtsne.hpp"
-#include "umappp/Umap.hpp"
+#include "umappp/umappp.hpp"
 
-#ifdef __has_include
-  #if __has_include(<filesystem>)
-    #include <filesystem>
-    namespace fs = std::filesystem;
-  #else
-    #include <experimental/filesystem>
-    namespace fs = std::experimental::filesystem;
-  #endif
-#else
-  #include <experimental/filesystem>
-  namespace fs = std::experimental::filesystem;
-#endif
+std::vector<int> split_mito_list(const std::string& mito_list) {
+    std::vector<int> output;
+    int current = 0;
+    bool empty = true;
 
-#include "load_features.hpp"
-#include "mito.h"
+    for (auto x : mito_list) {
+        switch (x) {
+            case '0': case '1': case '2': case '3': case '4': case '5': case '6': case '7': case '8': case '9': 
+                current *= 10;
+                current += (x - '0');
+                empty = false;
+                break;
+            case ',': 
+                if (empty) {
+                    throw std::runtime_error("empty row index in the mitochondrial list");
+                }
+                output.push_back(current);
+                current = 0;
+                empty = true;
+                break;
+            default:
+                throw std::runtime_error(std::string("unknown character '") + x + "' in the mitochondrial list");
+        }
+    }
+
+    if (empty) {
+        throw std::runtime_error("empty row index in the mitochondrial list");
+    } else {
+        output.push_back(current);
+    }
+    return output;
+}
 
 int main(int argc, char* argv []) {
     /******************************
      *** Parsing the arguments. ***
      ******************************/
 
-    CLI::App app{"Single-cell RNA-seq analyses on the command-line"};
-    
-    std::string path;
-    app.add_option("matrix", path, "Path to the Matrix Market file")->required();
-    std::string gpath;
-    app.add_option("genes", gpath, "Path to the gene annotation file")->required();
+    struct {
+        std::string file_path;
+        std::string output;
 
-    double nthreads;
-    app.add_option("-t,--nthreads", nthreads, "Number of threads to use (+2 for UMAP and t-SNE, which use their own threads)")
-        ->default_val(1);
-    
-    std::string output;
-    app.add_option("-o,--output", output, "Path to the output directory")
-        ->default_val("output");
+        std::string mito_list;
+        double num_mads;
 
-    bool skip_output;
-    app.add_flag("--skip-output", skip_output, "Run the analysis but do not save results")
-        ->default_val(false);
+        double fit_span;
+        int num_hvgs;
+        int num_pcs;
 
-    bool default_mito;
-    app.add_option("--qc-default-mito", default_mito, "Use the internal default set of mitochondrial genes")
-        ->default_val(true);
+        int nn_approx;
+        scran_graph_cluster::SnnWeightScheme snn_scheme;
+        int snn_neighbors;
+        double snn_resolution;
 
-    std::string mito_prefix;
-    app.add_option("--qc-mito-prefix", mito_prefix, "Prefix for the mitochondrial genes, if the default set is not used")
-        ->default_val("mt-");
+        double tsne_perplexity;
+        double tsne_iterations;
 
-    double nmads;
-    app.add_option("--qc-nmads", nmads, "Number of MADs to use for filtering")
-        ->default_val(3);
+        int umap_neighbors;
+        double umap_mindist;
+        int umap_epochs;
 
-    double span;
-    app.add_option("--hvg-span", span, "LOWESS span for variance modelling")
-        ->default_val(0.3);
+        int num_threads;
+    } all_opt;
 
-    int nhvgs;
-    app.add_option("--hvg-num", nhvgs, "Number of HVGs to use for PCA")
-        ->default_val(2500);
+    {
+        CLI::App app{"Single-cell RNA-seq analyses on the command-line"};
+        
+        app.add_option("counts", all_opt.file_path, "Path to the MatrixMarket file containing the counts.")->required();
+        app.add_option("-o,--output", all_opt.output, "Path to the output directory. If empty, results are not saved.")->default_val("output");
 
-    int npcs;
-    app.add_option("--pca-num", npcs, "Number of PCs to keep")
-        ->default_val(25);
+        app.add_option("--mito-list", all_opt.mito_list, "Comma-separated list of the 0-based row indices of the mitochondrial genes")->default_val("");
+        app.add_option("--num-mads", all_opt.num_mads, "Number of MADs to use for defining QC thresholds.")->default_val(3);
 
-    bool approx;
-    app.add_option("--nn-approx", approx, "Whether to use an approximate neighbor search")
-        ->default_val(true);
+        app.add_option("--fit-span", all_opt.fit_span, "LOWESS span for fitting the mean-variance trend.")->default_val(0.3);
+        app.add_option("--num-hvgs", all_opt.num_hvgs, "Number of HVGs to use for PCA.")->default_val(2500);
+        app.add_option("--num-pcs", all_opt.num_pcs, "Number of PCs to keep.")->default_val(25);
 
-    int snn_neighbors;
-    app.add_option("--snn-neighbors", snn_neighbors, "Number of neighbors to use for the SNN graph")
-        ->default_val(10);
+        app.add_option("--nn-approx", all_opt.nn_approx, "Whether to use an approximate neighbor search.")->default_val(true);
 
-    scran::BuildSNNGraph::Scheme snn_scheme;
-    std::map<std::string, scran::BuildSNNGraph::Scheme> scheme_map{
-        {"ranked", scran::BuildSNNGraph::RANKED}, 
-        {"number", scran::BuildSNNGraph::NUMBER}, 
-        {"jaccard", scran::BuildSNNGraph::JACCARD}
-    };
-    app.add_option("--snn-scheme", snn_scheme, "Edge weighting scheme: ranked, number or jaccard")
-        ->transform(CLI::CheckedTransformer(scheme_map, CLI::ignore_case))
-        ->default_val(scran::BuildSNNGraph::RANKED);
+        app.add_option("--snn-neighbors", all_opt.snn_neighbors, "Number of neighbors to use for the SNN graph.")->default_val(10);
+        std::map<std::string, scran_graph_cluster::SnnWeightScheme> scheme_map{
+            {"ranked", scran_graph_cluster::SnnWeightScheme::RANKED}, 
+            {"number", scran_graph_cluster::SnnWeightScheme::NUMBER}, 
+            {"jaccard", scran_graph_cluster::SnnWeightScheme::JACCARD}
+        };
+        app.add_option("--snn-scheme", all_opt.snn_scheme, "Edge weighting scheme: ranked, number or jaccard.")
+            ->transform(CLI::CheckedTransformer(scheme_map, CLI::ignore_case))
+            ->default_val(scran_graph_cluster::SnnWeightScheme::RANKED);
+        app.add_option("--snn-res", all_opt.snn_resolution, "Resolution to use in multi-level community detection.")->default_val(0.5);
 
-    double snn_res;
-    app.add_option("--snn-res", snn_res, "Resolution to use in multi-level community detection")
-        ->default_val(0.5);
+        app.add_option("--tsne-perplexity", all_opt.tsne_perplexity, "Perplexity to use in t-SNE.")->default_val(30);
+        app.add_option("--tsne-iter", all_opt.tsne_iterations, "Number of iterations to use in t-SNE.")->default_val(500);
+        app.add_option("--umap-neighbors", all_opt.umap_neighbors, "Number of neighbors to use in the UMAP.")->default_val(15);
+        app.add_option("--umap-mindist", all_opt.umap_mindist, "Minimum distance to use in the UMAP.")->default_val(0.1);
+        app.add_option("--umap-epochs", all_opt.umap_epochs, "Number of epochs to use in the UMAP.")->default_val(500);
 
-    double tsne_perplexity;
-    app.add_option("--tsne-perplexity", tsne_perplexity, "Perplexity to use in t-SNE")
-        ->default_val(30);
+        app.add_option("-t,--nthreads", all_opt.num_threads, "Number of threads to use (+2 for UMAP and t-SNE, which use their own threads).")->default_val(1);
 
-    int tsne_iterations;
-    app.add_option("--tsne-iter", tsne_iterations, "Number of iterations to use in t-SNE")
-        ->default_val(500);
+        CLI11_PARSE(app, argc, argv);
+    }
 
-    int umap_neighbors;
-    app.add_option("--umap-neighbors", umap_neighbors, "Number of neighbors to use in the UMAP")
-        ->default_val(15);
-
-    double umap_mindist;
-    app.add_option("--umap-mindist", umap_mindist, "Minimum distance to use in the UMAP")
-        ->default_val(0.01);
-    
-    int umap_epochs;
-    app.add_option("--umap-epochs", umap_epochs, "Number of epochs to use in the UMAP")
-        ->default_val(500);
-
-    CLI11_PARSE(app, argc, argv);
-
-    /********************************
-     *** Performing the analysis. ***
-     ********************************/
-
-    // Setting up some bits and pieces.
-    nthreads_global = nthreads;
-
+    // Setting up an easy timekeeping function.
     auto declare = [&](const auto& x) -> void {
         auto end = std::chrono::high_resolution_clock::now();
         std::cout << static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(end - x).count())/1000 << "s" << std::endl;
     };
 
-    // Loading the data from an MatrixMarket file.
-    tatami::LayeredMatrixData<double, int> mat;
-    {
-        std::cout << "Initializing matrix... " << std::flush;
-        auto start = std::chrono::high_resolution_clock::now();
-        size_t n = path.size();
-        if (n > 3 && path[n-3] == '.' && path[n-2] == 'g' && path[n-1] == 'z') {
-            mat = tatami::MatrixMarket::load_layered_sparse_matrix_gzip(path.c_str());
-        } else {
-            mat = tatami::MatrixMarket::load_layered_sparse_matrix(path.c_str());
-        }
-        declare(start);
-    }
+    /********************************
+     *** Performing the analysis. ***
+     ********************************/
 
-    // Loading data from the gene feature file.
-    std::vector<std::pair<std::string, std::string> > genes;
-    {
-        std::cout << "Initializing gene annotation... " << std::flush;
-        auto start = std::chrono::high_resolution_clock::now();
-        genes = load_features(gpath);
-        declare(start);
-    }
-
-    // Deriving mitochondrial subsets.
-    std::vector<uint8_t> mito(mat.matrix->nrow());
-    if (default_mito) {
-        size_t i = 0;
-        for (const auto& p : genes) {
-            if (mito_ensembl.find(p.first) != mito_ensembl.end() || mito_symbols.find(p.second) != mito_symbols.end()) {
-                mito[mat.permutation[i]] = 1;
-            }
-            ++i;
-        }
-    } else {
-        size_t i = 0;
-        for (const auto& p : genes) {
-            if (p.first.size() >= mito_prefix.size() && p.first.compare(0, mito_prefix.size(), mito_prefix) == 0) {
-                mito[mat.permutation[i]] = 1;
-            } else if (p.second.size() >= mito_prefix.size() && p.second.compare(0, mito_prefix.size(), mito_prefix) == 0) {
-                mito[mat.permutation[i]] = 1;
-            }
-            ++i;
-        }
-    }
-
-    // Filtering out low-quality cells. 
-    std::cout << "Computing QC metrics... " << std::flush;
+    std::cout << "Reading matrix from file... " << std::flush;
     auto start = std::chrono::high_resolution_clock::now();
-    auto qc_res = scran::PerCellQCMetrics().run(mat.matrix.get(), { mito.data() });
+    auto mat = tatami_mtx::load_matrix_from_some_file<double, int>(all_opt.file_path.c_str(), [&]{
+        tatami_mtx::Options opt;
+        opt.parallel = (all_opt.num_threads > 1);
+        return opt;
+    }());
+    declare(start);
+
+    std::vector<const uint8_t*> mito_ptrs; // Deriving mitochondrial subsets.
+    std::vector<uint8_t> mito;
+    bool has_mito = (all_opt.mito_list != "");
+    if (has_mito) {
+        auto mito_list = split_mito_list(all_opt.mito_list);
+        mito.resize(mat->nrow());
+        for (auto x : mito_list) {
+            if (x >= mat->nrow()) {
+                throw std::runtime_error("mitochondrial row index " + std::to_string(x) + " is out of range");
+            }
+            mito[x] = 1;
+        }
+        mito_ptrs.push_back(mito.data());
+    }
+
+    std::cout << "Computing QC metrics... " << std::flush;
+    start = std::chrono::high_resolution_clock::now();
+    auto qc_res = scran_qc::compute_rna_qc_metrics(*mat, mito_ptrs, [&]{
+        scran_qc::ComputeRnaQcMetricsOptions opt;
+        opt.num_threads = all_opt.num_threads;
+        return opt;
+    }());
     declare(start);
 
     std::cout << "Computing QC thresholds... " << std::flush;
     start = std::chrono::high_resolution_clock::now();
-    auto qc_filters = scran::PerCellQCFilters().set_nmads(nmads).run(qc_res);
+    auto qc_filters = scran_qc::compute_rna_qc_filters(qc_res, [&]{
+        scran_qc::ComputeRnaQcFiltersOptions opt;
+        opt.sum_num_mads = all_opt.num_mads;
+        opt.detected_num_mads = all_opt.num_mads;
+        opt.subset_proportion_num_mads = all_opt.num_mads;
+        return opt;
+    }());
     declare(start);
 
-    std::cout << "Filtering cells... " << std::flush;
+    std::cout << "Filtering out low-quality cells... " << std::flush;
     start = std::chrono::high_resolution_clock::now();
-    auto filtered = scran::FilterCells().run(mat.matrix, qc_filters.overall_filter.data());
+    auto keep_cells = qc_filters.filter(qc_res);
+    auto keep_cells_index = scran_qc::filter_index<int>(keep_cells.size(), keep_cells.data());
+    auto filtered = tatami::make_DelayedSubset(mat, keep_cells_index, /* row = */ false);
     declare(start);
 
-    // Computing log-normalized expression values, re-using the total count from the QC step.
     std::cout << "Log-normalizing the counts... " << std::flush;
     start = std::chrono::high_resolution_clock::now();
-    auto size_factors = scran::subset_vector<false>(qc_res.sums, qc_filters.overall_filter.data());
-    auto normalized = scran::LogNormCounts().run(filtered, std::move(size_factors));
+    std::vector<double> size_factors; // Reusing the total counts for the high-quality cells as their size factors.
+    size_factors.reserve(keep_cells_index.size());
+    for (auto x : keep_cells_index) {
+        size_factors.push_back(qc_res.sum[x]);
+    }
+    scran_norm::center_size_factors(size_factors.size(), size_factors.data(), NULL, scran_norm::CenterSizeFactorsOptions());
+    auto normalized = scran_norm::normalize_counts(filtered, std::move(size_factors), scran_norm::NormalizeCountsOptions());
     declare(start);
 
-    // Identifying highly variable genes.
     std::cout << "Mean-variance modelling... " << std::flush;
     start = std::chrono::high_resolution_clock::now();
-    auto var_res = scran::ModelGeneVar().set_span(span).run(normalized.get());
-    auto keep = scran::ChooseHVGs().set_top(nhvgs).run(var_res.residuals[0].size(), var_res.residuals[0].data());
+    auto var_res = scran_variances::model_gene_variances(*normalized, [&]{
+        scran_variances::ModelGeneVariancesOptions opt;
+        opt.fit_variance_trend_options.span = all_opt.fit_span;
+        opt.num_threads = all_opt.num_threads;
+        return opt;
+    }());
+    auto hvgs = scran_variances::choose_highly_variable_genes_index(var_res.residuals.size(), var_res.residuals.data(), [&]{
+        scran_variances::ChooseHighlyVariableGenesOptions opt;
+        opt.top = all_opt.num_hvgs;
+        return opt;
+    }());
     declare(start);
 
-    // Performing a PCA on the HVGs. We transpose the output so cells are columns again.
     std::cout << "Principal components analysis... " << std::flush;
     start = std::chrono::high_resolution_clock::now();
-    auto pca_res = scran::RunPCA().set_rank(npcs).run(normalized.get(), keep.data());
-    pca_res.pcs.adjointInPlace();
+    auto hvg_mat = tatami::make_DelayedSubset(normalized, std::move(hvgs), /* row = */ true);
+    auto pca_res = scran_pca::simple_pca(*hvg_mat, [&]{
+        scran_pca::SimplePcaOptions opt;
+        opt.number = all_opt.num_pcs;
+        opt.num_threads = all_opt.num_threads;
+        return opt;
+    }());
     declare(start);
 
     // Building the nearest neighbor index.
     std::cout << "Building the neighbor index... " << std::flush;
     start = std::chrono::high_resolution_clock::now();
-    std::unique_ptr<knncolle::Base<> > ptr;
-    if (approx) {
-        ptr.reset(new knncolle::AnnoyEuclidean<>(npcs, pca_res.pcs.cols(), pca_res.pcs.data()));
+    knncolle::SimpleMatrix<int, int, double> matview(pca_res.components.rows(), pca_res.components.cols(), pca_res.components.data());
+    std::unique_ptr<knncolle::Builder<decltype(matview), double> > builder;
+    if (all_opt.nn_approx) {
+        builder.reset(new knncolle_annoy::AnnoyBuilder<Annoy::Euclidean, decltype(matview), double>);
     } else {
-        ptr.reset(new knncolle::VpTreeEuclidean<>(npcs, pca_res.pcs.cols(), pca_res.pcs.data()));
+        builder.reset(new knncolle::VptreeBuilder<knncolle::EuclideanDistance, decltype(matview), double>);
     }
+    auto prebuilt_index = builder->build_unique(matview);
     declare(start);
 
-    // Finding all the neighbors.
-    std::cout << "Finding neighbors for clustering... " << std::flush;
+    // Finding all the neighbors. 
+    std::cout << "Finding nearest neighbors... " << std::flush;
     start = std::chrono::high_resolution_clock::now();
-    auto snn_nns = knncolle::find_nearest_neighbors_index_only<int>(ptr.get(), snn_neighbors);
+    int tsne_neighbors = qdtsne::perplexity_to_k(all_opt.tsne_perplexity);
+    auto most_nns = std::max({ all_opt.snn_neighbors, all_opt.umap_neighbors, tsne_neighbors });
+    auto common_nn_res = knncolle::find_nearest_neighbors(*prebuilt_index, most_nns, all_opt.num_threads);
+    size_t nobs = common_nn_res.size();
     declare(start);
 
-    std::cout << "Finding neighbors for t-SNE... " << std::flush;
-    start = std::chrono::high_resolution_clock::now();
-    auto tsne_nns = knncolle::find_nearest_neighbors<int, double>(ptr.get(), qdtsne::perplexity_to_k(tsne_perplexity));
-    declare(start);
-
-    std::cout << "Finding neighbors for UMAP... " << std::flush;
-    start = std::chrono::high_resolution_clock::now();
-    auto umap_nns = knncolle::find_nearest_neighbors<int, float>(ptr.get(), umap_neighbors);
-    declare(start);
-
-    // Running all remaining steps in parallel threads.
-    std::vector<double> tsne_output = qdtsne::initialize_random<>(ptr->nobs());
-    std::vector<float> umap_output(ptr->nobs() * 2);
-    std::vector<int> best_clustering;
-    scran::ScoreMarkers::Results<double> marker_res;
-
+    // Running the visualization steps in parallel threads.
     std::mutex cout_lock; 
 
-    std::thread first([&]() -> void {
-        auto start = std::chrono::high_resolution_clock::now();
-        auto snn_graph = scran::BuildSNNGraph().set_weighting_scheme(snn_scheme).run(snn_nns);
-        cout_lock.lock();
-        std::cout << "SNN graph construction... " << std::flush;
-        declare(start);
-        cout_lock.unlock();
-
-        start = std::chrono::high_resolution_clock::now();
-        auto clust_res = scran::ClusterSNNGraphMultiLevel().set_resolution(snn_res).run(snn_nns.size(), snn_graph);
-        cout_lock.lock();
-        std::cout << "Multi-level clustering... " << std::flush;
-        declare(start);
-        cout_lock.unlock();
-
-        start = std::chrono::high_resolution_clock::now();
-        best_clustering = clust_res.membership[clust_res.max];
-        marker_res = scran::ScoreMarkers().run(normalized.get(), best_clustering.data());
-        cout_lock.lock();
-        std::cout << "Marker detection... " << std::flush;
-        declare(start);
-        cout_lock.unlock();
-    });
-
+    std::vector<double> tsne_output = qdtsne::initialize_random<2>(prebuilt_index->num_observations());
     std::thread second([&]() -> void {
         auto start = std::chrono::high_resolution_clock::now();
-        qdtsne::Tsne<>().set_perplexity(tsne_perplexity).set_max_iter(tsne_iterations).set_max_depth(7).run(tsne_nns, tsne_output.data());
+
+        knncolle::NeighborList<int, double> tsne_nns;
+        tsne_nns.reserve(common_nn_res.size());
+        for (const auto& nn : common_nn_res) {
+            tsne_nns.emplace_back(nn.begin(), nn.begin() + tsne_neighbors);
+        }
+
+        auto status = qdtsne::initialize<2>(std::move(tsne_nns), [&]{
+            qdtsne::Options opt;
+            opt.perplexity = all_opt.tsne_perplexity;
+            opt.num_threads = all_opt.num_threads;
+            return opt;
+        }());
+        status.run(tsne_output.data());
+
         cout_lock.lock();
         std::cout << "t-SNE calculation... " << std::flush;
         declare(start);
         cout_lock.unlock();
     });
 
+    std::vector<float> umap_output(nobs * 2);
     std::thread third([&]() -> void {
         auto start = std::chrono::high_resolution_clock::now();
-        umappp::Umap<float>().set_min_dist(umap_mindist).set_num_epochs(umap_epochs).run(umap_nns, 2, umap_output.data());
+
+        knncolle::NeighborList<int, float> umap_nns(nobs); // single-precision speeds up the UMAP.
+        for (size_t i = 0; i < nobs; ++i) {
+            const auto& nn = common_nn_res[i];
+            auto& output = umap_nns[i];
+            for (int j = 0; j < all_opt.umap_neighbors; ++j) {
+                output.emplace_back(nn[j].first, nn[j].second);
+            }
+        }
+
+        auto status = umappp::initialize(std::move(umap_nns), 2, umap_output.data(), [&]{
+            umappp::Options opt;
+            opt.min_dist = all_opt.umap_mindist;
+            opt.num_epochs = all_opt.umap_epochs;
+            opt.num_threads = all_opt.num_threads;
+            return opt;
+        }());
+        status.run();
+
         cout_lock.lock();
         std::cout << "UMAP calculation... " << std::flush;
         declare(start);
         cout_lock.unlock();
     });
 
-    first.join();
+    // Running everything else on the main thread.
+    cout_lock.lock();
+    std::cout << "SNN graph construction... " << std::flush;
+    start = std::chrono::high_resolution_clock::now();
+    std::vector<std::vector<int> > snn_nns(nobs);
+    for (size_t i = 0; i < nobs; ++i) {
+        const auto& nn = common_nn_res[i];
+        auto& output = snn_nns[i];
+        for (int j = 0; j < all_opt.snn_neighbors; ++j) {
+            output.emplace_back(nn[j].first);
+        }
+    }
+    auto snn_graph = scran_graph_cluster::build_snn_graph(std::move(snn_nns), [&]{
+        scran_graph_cluster::BuildSnnGraphOptions opt;
+        opt.weighting_scheme = all_opt.snn_scheme;
+        opt.num_threads = all_opt.num_threads;
+        return opt;
+    }());
+    auto graph = scran_graph_cluster::convert_to_graph(snn_graph);
+    const auto& weights = snn_graph.weights; // edge weights
+    declare(start);
+    cout_lock.unlock();
+
+    cout_lock.lock();
+    std::cout << "Multi-level graph clustering... " << std::flush;
+    start = std::chrono::high_resolution_clock::now();
+    auto clust_res = scran_graph_cluster::cluster_multilevel(graph, weights, [&]{
+        scran_graph_cluster::ClusterMultilevelOptions opt;
+        opt.resolution = all_opt.snn_resolution;
+        return opt;
+    }());
+    declare(start);
+    cout_lock.unlock();
+
+    cout_lock.lock();
+    std::cout << "Marker detection... " << std::flush;
+    start = std::chrono::high_resolution_clock::now();
+    const auto& best_clustering = clust_res.membership;
+    auto marker_res = scran_markers::score_markers_summary(*normalized, best_clustering.data(), [&]{
+        scran_markers::ScoreMarkersSummaryOptions opt;
+        opt.num_threads = all_opt.num_threads;
+        return opt;
+    }());
+    declare(start);
+    cout_lock.unlock();
+
     second.join();
     third.join();
 
@@ -326,20 +356,27 @@ int main(int argc, char* argv []) {
      *** Saving the results. ***
      ***************************/
 
-    if (skip_output) {
+    const auto& output = all_opt.output;
+    if (output == "") {
         return 0;
     }
-
-    fs::create_directories(output);
+    std::filesystem::create_directories(output);
     
     // QC results.
     {
         std::ofstream handle(output + "/qc_metrics.tsv");
-        handle << "sums\tdetected\tmito_proportions\n";
+        handle << "sums\tdetected";
+        if (has_mito) {
+            handle << "\tmito_proportions";
+        }
+        handle << "\n";
         auto def = std::cout.precision();
-        for (size_t i = 0; i < qc_res.sums.size(); ++i) {
-            handle << std::setprecision(def) << qc_res.sums[i] << "\t" << qc_res.detected[i] << "\t";
-            handle << std::setprecision(6) << qc_res.subset_proportions[0][i] << "\n";
+        for (size_t i = 0, ncells = qc_res.sum.size(); i < ncells; ++i) {
+            handle << std::setprecision(def) << qc_res.sum[i] << "\t" << qc_res.detected[i];
+            if (has_mito) {
+                handle << "\t" << std::setprecision(6) << qc_res.subset_proportion[0][i];
+            }
+            handle << "\n";
         }
         handle << std::flush;
     }
@@ -347,21 +384,18 @@ int main(int argc, char* argv []) {
     {
         std::ofstream handle(output + "/qc_thresholds.tsv");
         handle << std::setprecision(6);
-        handle << "sums\t" << qc_filters.thresholds.sums[0] << "\n";
-        handle << "detected\t" << qc_filters.thresholds.detected[0] << "\n";
-        handle << "mito_proportions\t" << qc_filters.thresholds.subset_proportions[0][0] << "\n";
+        handle << "sums\t" << qc_filters.get_sum() << "\n";
+        handle << "detected\t" << qc_filters.get_detected() << "\n";
+        if (has_mito) {
+            handle << "mito_proportions\t" << qc_filters.get_subset_proportion()[0] << "\n";
+        }
         handle << std::flush;
     }
 
     {
-        std::ofstream handle(output + "/qc_discard.tsv");
-        handle << std::setprecision(6);
-        handle << "sums\tdetected\tmito_proportions\toverall\n";
-        for (size_t i = 0; i < qc_filters.filter_by_sums.size(); ++i) {
-            handle << static_cast<int>(qc_filters.filter_by_sums[i]) << "\t" 
-                << static_cast<int>(qc_filters.filter_by_detected[i]) << "\t" 
-                << static_cast<int>(qc_filters.filter_by_subset_proportions[0][i]) << "\t" 
-                << static_cast<int>(qc_filters.overall_filter[i]) << "\n";
+        std::ofstream handle(output + "/qc_keep.tsv");
+        for (auto x : keep_cells_index) {
+            handle << x << "\n";
         }
         handle << std::flush;
     }
@@ -370,27 +404,26 @@ int main(int argc, char* argv []) {
     {
         std::ofstream handle(output + "/variances.tsv");
         handle << std::setprecision(6);
-        handle << "id\tsymbol\tmean\tvariance\tfitted\tresid\n";
-        for (size_t i = 0; i < mat.permutation.size(); ++i) {
-            auto p = mat.permutation[i];
-            handle << genes[i].first << "\t" 
-                << genes[i].second << "\t"
-                << var_res.means[0][p] << "\t" 
-                << var_res.variances[0][p] << "\t"
-                << var_res.fitted[0][p] << "\t"
-                << var_res.residuals[0][p] << "\n";
+        handle << "mean\tvariance\tfitted\tresid\n";
+        for (size_t i = 0, end = var_res.means.size(); i < end; ++i) {
+            handle  
+                << var_res.means[i] << "\t" 
+                << var_res.variances[i] << "\t"
+                << var_res.fitted[i] << "\t"
+                << var_res.residuals[i] << "\n";
         }
         handle << std::flush;
     }
 
-    // PCA-related results.
+    // PCA-related results, stored in transposed form, effectively.
     {
         std::ofstream handle(output + "/pca.tsv");
         handle << std::setprecision(6);
-        for (size_t i = 0; i < pca_res.pcs.cols(); ++i) {
-            handle << pca_res.pcs(0, i); 
-            for (size_t j = 1; j < pca_res.pcs.rows(); ++j) {
-                handle << "\t" << pca_res.pcs(j, i);
+        size_t NR = pca_res.components.rows(), NC = pca_res.components.cols();
+        for (size_t i = 0; i < NC; ++i) {
+            handle << pca_res.components(0, i); 
+            for (size_t j = 1; j < NR; ++j) {
+                handle << "\t" << pca_res.components(j, i);
             }
             handle << "\n";
         }
@@ -417,21 +450,18 @@ int main(int argc, char* argv []) {
 
     // Marker results.
     {
-        fs::create_directory(output + "/markers");
-        for (size_t i = 0; i < marker_res.means.size(); ++i) {
+        std::filesystem::create_directory(output + "/markers");
+        for (size_t i = 0, nclusters = marker_res.mean.size(); i < nclusters; ++i) {
             std::ofstream handle(output + "/markers/" + std::to_string(i) + ".tsv");
             handle << "mean\tdetected\tlfc\tdelta_detected\tcohen\tauc\n";
             handle << std::setprecision(6);
-            for (size_t j = 0; j < mat.permutation.size(); ++j) {
-                auto p = mat.permutation[j];
-                handle << genes[j].first << "\t" 
-                    << genes[j].second << "\t"
-                    << marker_res.means[i][0][p] << "\t" 
-                    << marker_res.detected[i][0][p] << "\t"
-                    << marker_res.lfc[scran::differential_analysis::MEAN][i][p] << "\t"
-                    << marker_res.delta_detected[scran::differential_analysis::MEAN][i][p] << "\t"
-                    << marker_res.cohen[scran::differential_analysis::MEAN][i][p] << "\t"
-                    << marker_res.auc[scran::differential_analysis::MEAN][i][p] << "\n";
+            for (size_t j = 0, ngenes = mat->nrow(); j < ngenes; ++j) {
+                handle << marker_res.mean[i][j] << "\t" 
+                    << marker_res.detected[i][j] << "\t"
+                    << marker_res.delta_mean[i].mean[j] << "\t"
+                    << marker_res.delta_detected[i].mean[j] << "\t"
+                    << marker_res.cohens_d[i].mean[j] << "\t"
+                    << marker_res.auc[i].mean[j] << "\n";
             }
             handle << std::flush;
         }
@@ -441,7 +471,7 @@ int main(int argc, char* argv []) {
     {
         std::ofstream handle(output + "/tsne.tsv");
         handle << std::setprecision(6);
-        for (size_t i = 0; i < ptr->nobs(); ++i) {
+        for (size_t i = 0; i < nobs; ++i) {
             handle << tsne_output[2*i] << "\t" << tsne_output[2*i + 1] << "\n";
         }
         handle << std::flush;
@@ -450,7 +480,7 @@ int main(int argc, char* argv []) {
     {
         std::ofstream handle(output + "/umap.tsv");
         handle << std::setprecision(6);
-        for (size_t i = 0; i < ptr->nobs(); ++i) {
+        for (size_t i = 0; i < nobs; ++i) {
             handle << umap_output[2*i] << "\t" << umap_output[2*i + 1] << "\n";
         }
         handle << std::flush;
